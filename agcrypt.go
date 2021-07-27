@@ -1,186 +1,128 @@
-package main
+package agcrypt
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
-	"flag"
 	"fmt"
-	"io"
-	"log"
-	"os"
-	"strings"
 
 	"golang.org/x/crypto/scrypt"
 )
 
-const KeyLen = 32
-
 const packageSalt = "agcryptPglKIQwYK7LM75iM"
 
-func mustRandRead(data []byte) {
-	if _, err := rand.Read(data); err != nil {
-		panic("can't read random data: " + err.Error())
-	}
+func b64encode(b []byte) string {
+	return base64.URLEncoding.EncodeToString(b)
 }
 
-func b64encode(data []byte) string {
-	return base64.URLEncoding.EncodeToString(data)
-}
-
-func b64decode(data string) []byte {
-	decoded, err := base64.URLEncoding.DecodeString(data)
+func b64decode(s string) []byte {
+	b, err := base64.URLEncoding.DecodeString(s)
 	if err != nil {
 		return nil
 	}
-	return decoded
+	return b
 }
 
-type Key []byte
-
-func (k Key) String() string {
-	return b64encode(k)
-}
-
-func MakeKey(key []byte) (Key, error) {
-	newKey := make([]byte, KeyLen)
-	if len(key) != KeyLen || copy(newKey, key) != KeyLen {
-		return nil, fmt.Errorf("wrong len %d (%d expected)", len(key), KeyLen)
+func readCRNG(b []byte) {
+	if _, err := rand.Read(b); err != nil {
+		panic("cannot read CRNG: " + err.Error())
 	}
-	return Key(key), nil
 }
 
-func MakeKeyFromFile(name string) (Key, error) {
-	key, err := os.ReadFile(name)
-	if err != nil {
-		return nil, err
-	}
-	return MakeKey(b64decode(string(key)))
+func randBytes(n int) []byte {
+	b := make([]byte, n)
+	readCRNG(b)
+	return b
 }
 
-func GenerateKey() (Key, error) {
-	key := make([]byte, KeyLen)
-	mustRandRead(key)
-	return MakeKey(key)
-}
-
-func GenerateKeyFromPassphrase(passphrase string) (Key, error) {
-	key, err := scrypt.Key([]byte(passphrase), []byte(packageSalt), 1<<15, 8, 1, KeyLen)
-	if err != nil {
-		return nil, err
-	}
-	return MakeKey(key)
-}
-
-type Machine struct {
-	Key  Key
-	aead cipher.AEAD
-}
-
-func NewMachine(key Key) (m *Machine, err error) {
-	if key == nil {
-		key, err = GenerateKey()
-		if err != nil {
-			return nil, err
-		}
-	}
-
+func newAEAD(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
-
-	return &Machine{Key: key, aead: aead}, nil
+	return aead, nil
 }
 
-func (m *Machine) EncryptString(data string) (string, error) {
-	nonce := make([]byte, m.aead.NonceSize())
-	mustRandRead(nonce)
-	ciphertext := m.aead.Seal(nil, nonce, []byte(data), nil)
-	return b64encode(nonce) + "." + b64encode(ciphertext), nil
+func convertPassphrase(p string) ([]byte, error) {
+	return scrypt.Key([]byte(p), []byte(packageSalt), 1<<15, 8, 1, KeySize)
 }
 
-func (m *Machine) DecryptString(data string) (string, error) {
-	split := strings.SplitN(data, ".", 2)
-	nonce, ciphertext := b64decode(split[0]), b64decode(split[1])
-	if len(nonce) != m.aead.NonceSize() {
-		return "", fmt.Errorf("wrong nonce length: %d (%d expected)", len(nonce), m.aead.NonceSize())
+const KeySize = 32
+
+type Key struct {
+	key  []byte
+	aead cipher.AEAD
+}
+
+func NewKey(b []byte) (*Key, error) {
+	if b == nil {
+		b = randBytes(KeySize)
 	}
 
-	plaintext, err := m.aead.Open(nil, nonce, ciphertext, nil)
+	key := make([]byte, KeySize)
+	if len(b) != KeySize || copy(key, b) != KeySize {
+		return nil, fmt.Errorf("agcrypt: wrong key length: %v (%v expected)", len(b), KeySize)
+	}
+
+	aead, err := newAEAD(key)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("agcrypt: cannot initialize AEAD: %v", err)
 	}
-	return string(plaintext), nil
+
+	return &Key{key, aead}, nil
 }
 
-func main() {
-	genKey := flag.Bool("gen-key", false, "generate a new key")
-	passphrase := flag.String("passphrase", "", "passphrase used for encryption/decryption or key generation")
-	keyString := flag.String("key", "", "key")
-	keyFile := flag.String("key-file", "", "read a key from the file")
-	encrypt := flag.Bool("encrypt", true, "encryption mode")
-	decrypt := flag.Bool("decrypt", false, "decryption mode")
-	flag.Parse()
+func NewKeyString(s string) (*Key, error) {
+	return NewKey(b64decode(s))
+}
 
-	var key Key
-	var err error
-	if *genKey {
-		if len(*passphrase) > 0 {
-			key, err = GenerateKeyFromPassphrase(*passphrase)
-		} else {
-			key, err = GenerateKey()
-		}
+func NewKeyPassphrase(p string) (*Key, error) {
+	b, err := convertPassphrase(p)
+	if err != nil {
+		return nil, fmt.Errorf("agcrypt: cannot convert passphrase: %v", err)
+	}
+	return NewKey(b)
+}
+
+func (k *Key) Encrypt(plaintext []byte) ([]byte, error) {
+	if k == nil {
+		var err error
+		k, err = NewKey(nil)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
-		fmt.Println(key)
-		return
 	}
+	nonce := randBytes(k.aead.NonceSize())
+	return append(nonce, k.aead.Seal(nil, nonce, []byte(plaintext), nil)...), nil
+}
 
-	switch {
-	case len(*passphrase) > 0:
-		key, err = GenerateKeyFromPassphrase(*passphrase)
-	case len(*keyString) > 0:
-		key, err = MakeKey(b64decode(*keyString))
-	case len(*keyFile) > 0:
-		key, err = MakeKeyFromFile(*keyFile)
+func (k *Key) Decrypt(ciphertext []byte) ([]byte, error) {
+	if len(ciphertext) < k.aead.NonceSize() {
+		return nil, fmt.Errorf("agcrypt: ciphertext is too short: %v (at least %v expected)", len(ciphertext), k.aead.NonceSize())
 	}
-	if err != nil {
-		log.Fatal(err)
-	}
+	nonce, ctext := ciphertext[:k.aead.NonceSize()], ciphertext[k.aead.NonceSize():]
+	return k.aead.Open(nil, nonce, ctext, nil)
+}
 
-	machine, err := NewMachine(key)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if key == nil {
-		fmt.Println("encryption key:", machine.Key)
-	}
+func (k *Key) EncryptString(plaintext string) (string, error) {
+	ctext, err := k.Encrypt([]byte(plaintext))
+	return b64encode(ctext), err
+}
 
-	in := flag.Arg(0)
-	if len(in) == 0 {
-		stdin, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			log.Fatal(err)
-		}
-		in = string(stdin)
-	}
+func (k *Key) DecryptString(ciphertext string) (string, error) {
+	ptext, err := k.Decrypt(b64decode(ciphertext))
+	return string(ptext), err
+}
 
-	var out string
-	if *decrypt || !*encrypt {
-		out, err = machine.DecryptString(in)
-	} else {
-		out, err = machine.EncryptString(in)
-	}
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(out)
+func (k *Key) Bytes() []byte {
+	return k.key
+}
+
+func (k *Key) String() string {
+	return b64encode(k.key)
 }
