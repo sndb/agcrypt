@@ -36,16 +36,16 @@ func randBytes(n int) []byte {
 	return b
 }
 
-func newAEAD(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
+func newGCM(key []byte) (cipher.AEAD, error) {
+	c, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	aead, err := cipher.NewGCM(block)
+	gcm, err := cipher.NewGCM(c)
 	if err != nil {
 		return nil, err
 	}
-	return aead, nil
+	return gcm, nil
 }
 
 func convertPassphrase(p string) ([]byte, error) {
@@ -55,8 +55,8 @@ func convertPassphrase(p string) ([]byte, error) {
 const KeySize = 32
 
 type Key struct {
-	key  []byte
-	aead cipher.AEAD
+	key []byte
+	gcm cipher.AEAD
 }
 
 func NewKey(b []byte) (*Key, error) {
@@ -69,19 +69,19 @@ func NewKey(b []byte) (*Key, error) {
 		return nil, fmt.Errorf("agcrypt: wrong key length: %v (%v expected)", len(b), KeySize)
 	}
 
-	aead, err := newAEAD(key)
+	gcm, err := newGCM(key)
 	if err != nil {
-		return nil, fmt.Errorf("agcrypt: cannot initialize AEAD: %v", err)
+		return nil, fmt.Errorf("agcrypt: cannot initialize GCM: %v", err)
 	}
 
-	return &Key{key, aead}, nil
+	return &Key{key, gcm}, nil
 }
 
-func NewKeyString(s string) (*Key, error) {
+func NewKeyFromString(s string) (*Key, error) {
 	return NewKey(b64decode(s))
 }
 
-func NewKeyPassphrase(p string) (*Key, error) {
+func NewKeyFromPassphrase(p string) (*Key, error) {
 	b, err := convertPassphrase(p)
 	if err != nil {
 		return nil, fmt.Errorf("agcrypt: cannot convert passphrase: %v", err)
@@ -97,16 +97,16 @@ func (k *Key) Encrypt(plaintext []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
-	nonce := randBytes(k.aead.NonceSize())
-	return append(nonce, k.aead.Seal(nil, nonce, []byte(plaintext), nil)...), nil
+	nonce := randBytes(k.gcm.NonceSize())
+	return append(nonce, k.gcm.Seal(nil, nonce, []byte(plaintext), nil)...), nil
 }
 
 func (k *Key) Decrypt(ciphertext []byte) ([]byte, error) {
-	if len(ciphertext) < k.aead.NonceSize() {
-		return nil, fmt.Errorf("agcrypt: ciphertext is too short: %v (at least %v expected)", len(ciphertext), k.aead.NonceSize())
+	if len(ciphertext) < k.gcm.NonceSize() {
+		return nil, fmt.Errorf("agcrypt: ciphertext is too short: %v (at least %v expected)", len(ciphertext), k.gcm.NonceSize())
 	}
-	nonce, ctext := ciphertext[:k.aead.NonceSize()], ciphertext[k.aead.NonceSize():]
-	return k.aead.Open(nil, nonce, ctext, nil)
+	nonce, ctext := ciphertext[:k.gcm.NonceSize()], ciphertext[k.gcm.NonceSize():]
+	return k.gcm.Open(nil, nonce, ctext, nil)
 }
 
 func (k *Key) EncryptString(plaintext string) (string, error) {

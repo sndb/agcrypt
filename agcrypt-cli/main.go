@@ -24,7 +24,7 @@ func main() {
 	var err error
 	if *genKey {
 		if len(*passphrase) > 0 {
-			key, err = agcrypt.NewKeyPassphrase(*passphrase)
+			key, err = agcrypt.NewKeyFromPassphrase(*passphrase)
 		} else {
 			key, err = agcrypt.NewKey(nil)
 		}
@@ -37,9 +37,9 @@ func main() {
 
 	switch {
 	case len(*passphrase) > 0:
-		key, err = agcrypt.NewKeyPassphrase(*passphrase)
+		key, err = agcrypt.NewKeyFromPassphrase(*passphrase)
 	case len(*keyString) > 0:
-		key, err = agcrypt.NewKeyString(*keyString)
+		key, err = agcrypt.NewKeyFromString(*keyString)
 	case len(*keyFile) > 0:
 		var b []byte
 		b, err = os.ReadFile(*keyFile)
